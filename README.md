@@ -16,7 +16,7 @@ typed-function has the following features:
 - Runtime type-checking of input arguments.
 - Automatic type conversion of arguments.
 - Compose typed functions with multiple signatures.
-- Supports union types, any type, and variable arguments.
+- Supports union types, subtypes, any type, and variable arguments.
 - Detailed error messaging.
 
 Supported environments: node.js, Chrome, Firefox, Safari, Opera, IE11+.
@@ -143,23 +143,29 @@ catch (err) {
 
 typed-function has the following built-in types:
 
-- `null`
-- `boolean`
+- `undefined` (a singleton type)
+- `null` (also a singleton)
+- `boolean` (for plain built-in booleans, not instances of `Boolean`)
 - `number`
 - `string`
-- `Function`
+- `Function` (for ordinary `function` entities)
 - `Array`
 - `Date`
 - `RegExp`
-- `Object`
+- `Object` (comprising non-null, non-class objects with the default Object
+constructor)
 
+Note that as defined, all of the built-in types are disjoint from one another.
 The following type expressions are supported:
 
 - Multiple arguments: `string, number, Function`
 - Union types: `number | string`
 - Variable arguments: `...number`
-- Any type: `any`
+- Any type: `any` (contains all entities; is a supertype of every type)
 
+Additional types may be defined, types may be removed, or the default
+collection of types may be replaced. A new type that is added may be defined
+as a subtype of another type.
 
 ## API
 
@@ -194,7 +200,7 @@ A typed function can be constructed in two ways:
     Example:
     
     ```js
-    typed.conversions.push({
+    typed.addConversions({
       from: 'number',
       to: 'string',
       convert: function (x) {
@@ -229,12 +235,15 @@ A typed function can be constructed in two ways:
     var f = typed.find(fn, 'number, string');
     ```
 
--   `typed.addType(type: {name: string, test: function} [, beforeObjectTest=true]): void`
+-   `typed.addType(type: {name: string, test: function, isa?: string|string[]} [, beforeObjectTest=true]): void`
 
-    Add a new type. A type object contains a name and a test function.
-    The order of the types determines in which order function arguments are 
-    type-checked, so for performance it's important to put the most used types 
-    first. All types are added to the Array `typed.types`. 
+    Add a new type. A type object contains a name and a test function, and
+    optionally an `isa` property specifying the new type is a subtype of the
+    given other type (or types, if the value of `isa` is an array of type
+    names.) The order of the types determines in which order function arguments
+    are type-checked, so for performance it's importan to put the most used
+    types first (and subtypes must be before supertypes, although that ordering
+    is handled automatically).
     
     Example:
     
@@ -251,12 +260,47 @@ A typed function can be constructed in two ways:
         return x && x.isPerson === true;
       }
     });
+    typed.addType({
+      name: 'Employee',
+      isa: 'Person',
+      test: x => 'employer' in x
+    });
     ```
 
-    By default, the new type will be inserted before the `Object` test
-    because the `Object` test also matches arrays and classes and hence
-    `typed-function` would never reach the new type. When `beforeObjectTest`
-    is `false`, the new type will be added at the end of all tests.
+    By default, the new type will be inserted immediately before all of its
+    supertypes, if any, or immediately before the `Object` test,
+    because of the possibility that instances might also be `Object` instances
+    and the likelihood that a newly-defined type will be more frequently
+    used than the generic `Object`. When `beforeObjectTest` is `false`, the
+    new type will be added at the end of all tests (if it is not a subtype).
+
+    Some final remaining points about types:
+    1. When testing for membership in a subtype, the test functions for all
+       supertypes are executed first, and only if they are all true is the
+       test for the subtype itself executed. Thus, the tests for the supertypes
+       do not need to be reiterated. For example when testing that an argument
+       is an 'Employee,' first the `isPerson` property will be checked, and
+       only if it is true will the presence of the `employer` property be
+       examined.
+    2. Specifying an array of multiple supertypes in the `isa` property provides
+       for a rudimentary form of intersection types.
+    3. The meaning of the `any` type is fixed and cannot be changed. Attempting
+       to add an `any` type will throw an error.
+
+-   `typed.removeType(name: string)`
+
+    Eliminates the named type from the type system.
+
+-   `typed.resetTypes(newtypes: Array.<type specification object>)`
+
+    Eliminates all types from the type system and replaces them with the
+    ones listed in the given array `newtypes`. Each entry in the Array is an
+    object following the format described in `typed.addType()` above.
+
+-   `typed.allTypes()`
+
+    Returns a deep copy of the list of types currently in the type system.
+    Modifying the return value has no effect on the type system.
 
 -   `typed.addConversion(conversion: {from: string, to: string, convert: function}) : void`
 
@@ -276,6 +320,11 @@ A typed function can be constructed in two ways:
     best to add all of your desired automatic conversions before defining any
     typed functions.
 
+    It is not allowed to add a conversion from a subtype to a supertype (since
+    all subtype elements are necessarily supertype elements already). On the
+    other hand, a conversion defined for a supertype automatically applies
+    to any of its subtypes.
+
 -   `typed.createError(name: string, args: Array.<any>, signatures: Array.<Signature>): TypeError`
 
     Generates a custom error object reporting the problem with calling
@@ -288,44 +337,17 @@ A typed function can be constructed in two ways:
 
 ### Properties
 
--   `typed.types: Array.<{name: string, test: function}>`
+-   `typed.types: Array.<{name: string, test: function, isa?: string}>`
 
-    Array with types. Each object contains a type name and a test function.
-    The order of the types determines in which order function arguments are 
-    type-checked, so for performance it's important to put the most used types 
-    first. Custom types can be added like:
-
-    ```js
-    function Person(...) {
-      ...
-    }
-    
-    Person.prototype.isPerson = true;
-
-    typed.types.push({
-      name: 'Person',
-      test: function (x) {
-        return x && x.isPerson === true;
-      }
-    });
-    ```
+    Use of this property is deprecated. Provides limited access to the
+    internal array of all currently defined types. Use the type-related
+    methods defined above instead.
 
 -   `typed.conversions: Array.<{from: string, to: string, convert: function}>`
 
-    An Array with built-in conversions. Empty by default. Can be used to define
-    conversions from `boolean` to `number`. For example:
-
-    ```js
-    typed.conversions.push({
-      from: 'boolean',
-      to: 'number',
-      convert: function (x) {
-        return +x;
-    });
-    ```
-
-    Also note the `addConversion()` method above for simply adding a single
-    conversion at a time.
+    An Array with built-in conversions. Empty by default. However, use of the
+    `addConversion()` method above, if possible, is recommended instead of
+    modifying this property directly.
     
 -   `typed.ignore: Array.<string>`
 

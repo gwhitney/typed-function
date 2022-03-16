@@ -34,6 +34,95 @@
     return undefined;
   }
 
+  const maxTypes = Infinity; // needs to be bigger than any number of types
+  /* Returns a map from type names to indices in the array, performing
+     some error checks as it goes
+  */
+  function makeTypeIndex (types) {
+    let map = new Map();
+    for (let i = 0; i < types.length; ++i) {
+      const name = types[i].name
+      if (name === 'any') {
+        throw new TypeError("Redefinition of 'any' type is not allowed.")
+      }
+      if (map.has(name)) {
+        throw new TypeError(`Duplicate definition of type '${name}'.`)
+      }
+      map.set(name, i)
+      if ('isa' in types[i]) {
+        if (typeof types[i].isa === 'string') {
+          types[i].isa = [types[i].isa]
+        }
+        for (const sup of types[i].isa) {
+          if (sup === name) {
+            throw new TypeError(`Type ${name} is subtype of itself.`)
+          }
+        }
+      }
+    }
+    return map
+  }
+  
+  /* Returns true if a isa (recursively) b */
+  function subtypeOf (a, b, typespace) {
+    if (a === b) return true
+    if (b === typespace.anyType) return true
+    if (a === typespace.anyType) return false
+    let checked = new Set()
+    let toCheck = new Set()
+    toCheck.add(a.name)
+    while (toCheck.size > 0) {
+      for (const item of toCheck) {
+        const type = typespace.typeArray[typespace.typeIndex.get(item)]
+        toCheck.delete(item)
+        if ('isa' in type) {
+          for (const sup of type.isa) {
+            if (sup === b.name) return true
+            if (checked.has(sup)) continue
+            if (sup === a.name) {
+              throw new TypeError(`Type ${a.name} is a supertype of itself.`)
+            }
+            toCheck.add(sup)
+          }
+        }
+        checked.add(item)
+      }
+    }
+    return false
+  }
+  
+  /* Orders the typeArray properly, fills in the `contains` properties
+     (reversal of `isa`, with `any` containing all the non-subtypes), and
+     sets up the type index.
+  */
+  function organizeTypes (typespace) {
+    // make temporary indices
+    typespace.typeIndex = makeTypeIndex(typespace.typeArray)
+    typespace.typeArray = typespace.typeArray.sort((a,b) => {
+      if (subtypeOf(a, b, typespace)) return -1
+      if (subtypeOf(b, a, typespace)) return 1
+      // otherwise just stabilize on the original order
+      return (typespace.typeIndex.get(a) < typespace.typeIndex.get(b)) ? -1 : 1
+    })
+    // Now we can get the final index
+    typespace.typeIndex = makeTypeIndex(typespace.typeArray)
+    // Set up the contains reverse links
+    for (const type of typespace.typeArray) {
+      type.contains = new Set()
+    }
+    typespace.anyType.contains = new Set()
+    for (const type of typespace.typeArray) {
+      if ('isa' in type) {
+        for (const sup of type.isa) {
+          const supType = typespace.typeArray[typespace.typeIndex.get(sup)]
+          supType.contains.add(type.name)
+        }
+      } else {
+        typespace.anyType.contains.add(type.name)
+      }
+    }
+  }
+  
   /**
    * @typedef {{
    *   params: Param[],
@@ -61,6 +150,7 @@
    *
    * @typedef {{
    *   name: string,
+   *   isa?: string | string[]
    *   test: function(*) : boolean
    * }} TypeDef
    */
@@ -96,11 +186,14 @@
 
     // This is a temporary object, will be replaced with a typed function at the end
     var typed = {
-      types: _types,
+      typeArray: _types,
+      anyType,
       conversions: _conversions,
       ignore: _ignore
     };
 
+    organizeTypes(typed);
+    
     /**
      * Find the test function for a type
      * @param {String} typeName
@@ -108,19 +201,15 @@
      *                    Throws a TypeError otherwise
      */
     function findTypeByName (typeName) {
-      var entry = findInArray(typed.types, function (entry) {
-        return entry.name === typeName;
-      });
-
-      if (entry) {
-        return entry;
-      }
-
       if (typeName === 'any') { // special baked-in case 'any'
-        return anyType;
+        return typed.anyType;
       }
 
-      var hint = findInArray(typed.types, function (entry) {
+      if (typed.typeIndex.has(typeName)) {
+        return typed.typeArray[typed.typeIndex.get(typeName)];
+      }
+
+      var hint = findInArray(typed.typeArray, function (entry) {
         return entry.name.toLowerCase() === typeName.toLowerCase();
       });
 
@@ -134,30 +223,57 @@
      * @return {number}
      */
     function findTypeIndex(type) {
-      if (type === anyType) {
-        return 999;
+      if (type.name === 'any') {
+        return maxTypes;
       }
-
-      return typed.types.indexOf(type);
+      if (!typed.typeIndex.has(type.name)) {
+        return -1;
+      }
+      return typed.typeIndex.get(type.name);
     }
 
     /**
-     * Find a type that matches a value.
+     * Refine the type of a value to its most specialized subtypes.
      * @param {*} value
-     * @return {string} Returns the name of the first type for which
-     *                  the type test matches the value.
+     * @param {TypeDef} knownType -- a type `value` is known to inhabit
+     * @param {string} 'specialized' | 'all' -- whether to return
+     *                 just the most specialized types containing the value
+     *                 (which is the default) or all such types.
+     * @return {Set.<string>} The subtypes of knownType that value inhabits
      */
-    function findTypeName(value) {
-      var entry = findInArray(typed.types, function (entry) {
-        return entry.test(value);
-      });
-
-      if (entry) {
-        return entry.name;
+    function findSubtypesOf (value, knownType, which = 'specialized') {
+      const result = new Set()
+      for (const typeName of knownType.contains) {
+        const type = findTypeByName(typeName)
+        if (type.test(value)) {
+          for (const otherType of findSubtypesOf(value, type)) {
+            result.add(otherType)
+          }
+        }
       }
-
-      throw new TypeError('Value has unknown type. Value: ' + value);
+      if (which !== 'specialized' || result.size === 0) {
+        result.add(knownType.name)
+      }
+      return result
     }
+
+    /**
+     * Find the types of a value.
+     * @param {*} value
+     * @param {'specialized' | 'all'} -- whether to return just the most
+     *                 specialized types containing the value (which is
+     *                 the default) or all such types.
+     * @return {Set.<string>} Returns the set of types for which the type
+     *                 test matches the value.
+     */
+    function findTypeOf(value, which = 'specialized') {
+      const result = findSubtypesOf(value, typed.anyType, which)
+      if (which === 'specialized' && result.size === 1 && result.has('any')) {
+        throw new TypeError('Value has unknown type. Value: ' + value);
+      }
+      return result;
+    }
+
 
     /**
      * Find a specific signature from a (composed) typed function, for example:
@@ -176,7 +292,7 @@
      */
     function find (fn, signature) {
       if (!fn.signatures) {
-        throw new TypeError('Function is no typed-function');
+        throw new TypeError('Function is not a typed-function');
       }
 
       // normalize input
@@ -208,25 +324,43 @@
     }
 
     /**
+     * Return the Set of all subtypes of the named type.
+     * param {string} type
+     */
+    function subtypesOf (typeName) {
+      const result = new Set()
+      result.add(typeName)
+      for (const subtypeName of findTypeByName(typeName).contains) {
+        for (const descendant of subtypesOf(subtypeName)) {
+          result.add(descendant)
+        }
+      }
+      return result
+    }
+
+    /**
      * Convert a given value to another data type.
      * @param {*} value
      * @param {string} type
      */
     function convert (value, type) {
-      var from = findTypeName(value);
-
+      var fromSet = findTypeOf(value, 'all');
       // check conversion is needed
-      if (type === from) {
+      if (fromSet.has(type)) {
         return value;
       }
 
-      for (var i = 0; i < typed.conversions.length; i++) {
-        var conversion = typed.conversions[i];
-        if (conversion.from === from && conversion.to === type) {
-          return conversion.convert(value);
+      var toSet = subtypesOf(type)
+      for (const to of toSet) {
+        for (const from of fromSet) {
+          for (var i = 0; i < typed.conversions.length; i++) {
+            var conversion = typed.conversions[i];
+            if (conversion.from === from && conversion.to === type) {
+              return conversion.convert(value);
+            }
+          }
         }
       }
-
       throw new Error('Cannot convert from ' + from + ' to ' + type);
     }
     
@@ -617,7 +751,7 @@
      * @return {number} Returns the index of the lowest type in typed.types
      */
     function getLowestTypeIndex (param) {
-      var min = 999;
+      var min = maxTypes;
 
       for (var i = 0; i < param.types.length; i++) {
         if (isExactType(param.types[i])) {
@@ -635,7 +769,7 @@
      * @return {number} Returns the lowest index of the conversions of this type
      */
     function getLowestConversionIndex (param) {
-      var min = 999;
+      var min = maxTypes;
 
       for (var i = 0; i < param.types.length; i++) {
         if (!isExactType(param.types[i])) {
@@ -727,19 +861,22 @@
      *                        for every type (if any)
      */
     function filterConversions(conversions, typeNames) {
-      var matches = {};
+      const okTo = new Set()
+      for (const name of typeNames) {
+        for (const subname of subtypesOf(name)) {
+          okTo.add(subname)
+        }
+      }
+      var matches = new Map()
 
-      conversions.forEach(function (conversion) {
-        if (typeNames.indexOf(conversion.from) === -1 &&
-            typeNames.indexOf(conversion.to) !== -1 &&
-            !matches[conversion.from]) {
-          matches[conversion.from] = conversion;
+      conversions.forEach(conversion => {
+        if (!matches.has(conversion.from) && okTo.has(conversion.to) &&
+            !okTo.has(conversion.from)) {
+          matches.set(conversion.from, conversion);
         }
       });
 
-      return Object.keys(matches).map(function (from) {
-        return matches[from];
-      });
+      return Array.from(matches.values())
     }
 
     /**
@@ -1329,6 +1466,7 @@
       return signaturesMap;
     }
 
+    const savetyped = typed
     typed = createTypedFunction('typed', {
       'string, Object': createTypedFunction,
       'Object': function (signaturesMap) {
@@ -1351,7 +1489,9 @@
     });
 
     typed.create = create;
-    typed.types = _types;
+    typed.typeArray = savetyped.typeArray;
+    typed.typeIndex = savetyped.typeIndex;
+    typed.anyType = savetyped.anyType;
     typed.conversions = _conversions;
     typed.ignore = _ignore;
     typed.onMismatch = _onMismatch;
@@ -1362,7 +1502,7 @@
 
     /**
      * add a type
-     * @param {{name: string, test: function}} type
+     * @param {TypeDef} type
      * @param {boolean} [beforeObjectTest=true]
      *                          If true, the new test will be inserted before
      *                          the test with name 'Object' (if any), since
@@ -1373,18 +1513,54 @@
         throw new TypeError('Object with properties {name: string, test: function} expected');
       }
 
-      if (beforeObjectTest !== false) {
-        for (var i = 0; i < typed.types.length; i++) {
-          if (typed.types[i].name === 'Object') {
-            typed.types.splice(i, 0, type);
-            return
+      const beforeObject = beforeObjectTest !== false
+      const isa = `isa` in type
+      if (isa && !Array.isArray(type.isa)) {
+        type.isa = [type.isa]
+      }
+      if (beforeObject || type.isa) {
+        for (var i = 0; i < typed.typeArray.length; i++) {
+          const tname = typed.typeArray[i].name
+          if ((beforeObject && tname === 'Object') || type.isa.includes(tname)) {
+            typed.typeArray.splice(i, 0, type);
+            break
           }
         }
+      } else {
+        typed.typeArray.push(type);
       }
-
-      typed.types.push(type);
+      organizeTypes(typed);
     };
 
+    /**
+     * Remove the named type from the type system. May invalidate
+     * previously generated typed-functions.
+     */
+    typed.removeType = name => {
+      if (!typed.typeIndex.has(name)) {
+        throw new TypeError(`No such type as '${name}'.`)
+      }
+      typed.typeArray.splice(typed.typeIndex.get(name), 1)
+      organizeTypes(typed)
+    }
+
+    /**
+     * Replace the types entirely
+     * @param {Array.<TypeDef>
+     */
+    typed.resetTypes = newtypes => {
+      typed.typeArray = newtypes
+      organizeTypes(typed)
+    }
+
+    /**
+     * Return a (deep) copy of the collection of types. (Modifying
+     * it has no effect on the type system
+     */
+    typed.allTypes = () => {
+      return typed.typeArray.map(obj => Object.assign({}, obj))
+    }
+    
     // add a conversion
     typed.addConversion = function (conversion) {
       if (!conversion
@@ -1393,9 +1569,59 @@
           || typeof conversion.convert !== 'function') {
         throw new TypeError('Object with properties {from: string, to: string, convert: function} expected');
       }
-
+      const fromType = findTypeByName(conversion.from)
+      const toType = findTypeByName(conversion.from)
+      if (subtypeOf(from, to)) {
+        throw new TypeError(
+          `Disallowed conversion to '${to}' from its subtype '${from}'.`);
+      }
+      if (findInArray(
+        typed.conversions,
+        item => item.from == from && item.to == to)) {
+        throw new TypeError(
+          `Redefinition of conversion from '${from}' to '${to}'.`);
+      }
       typed.conversions.push(conversion);
     };
+
+    // A function to return some version of the typeArray to
+    // support its deprecated direct use via typed.types:
+    function proxyOrFrozenTypeArray(typespace) {
+      if (Proxy === undefined) {
+        const pseudotypes = Array.from(typespace.typeArray)
+        Object.freeze(pseudotypes)
+        pseudotypes.push = typespace.addType
+        return pseudotypes
+      }
+      return new Proxy(typespace.typeArray, {
+        get: (target, prop) => {
+          const proptype = typeof prop
+          if (['number', 'symbol'].includes(proptype)) {
+            return target[prop]
+          }
+          if (proptype === 'string') {
+            const idx = parseInt(prop, 10)
+            if (!isNaN(idx)) return target[idx]
+            if (prop === 'push') return typespace.addType
+            const passThrough = ['iterable', 'length']
+            if (passThrough.includes(prop)) return target[prop]
+          }
+          return undefined
+        },
+        set: (target, prop, val) => {
+          console.log(`Deprecated 'types' access, ${prop} not changed`)
+          return false
+        },
+        deleteProperty: (target, prop) => typespace.removeType(prop)
+      })
+    }
+    
+    // Define getter/setter for deprecated "types" property for backward
+    // compatibility
+    Object.defineProperty(typed, 'types', {
+      set: newtypes => typed.resetTypes(newtypes),
+      get: () => proxyOrFrozenTypeArray(typed)
+    })
 
     return typed;
   }
