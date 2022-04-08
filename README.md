@@ -157,7 +157,7 @@ The following type expressions are supported:
 
 - Multiple arguments: `string, number, Function`
 - Union types: `number | string`
-- Variable arguments: `...number`
+- Variable arguments: `...number` [matches ONE or more numbers]
 - Any type: `any`
 
 ### Dispatch

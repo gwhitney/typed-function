@@ -1159,6 +1159,7 @@
       const clearedMap = {}
 
       for (let signature in signatureMap) {
+        if (!signatureMap.hasOwnProperty(signature)) continue;
         const fn = signatureMap[signature]
 
         if (isReferToSelf(fn)) {
@@ -1190,6 +1191,7 @@
         let nothingResolved = true
 
         for (let signature in resolvedMap) {
+          if (!resolvedMap.hasOwnProperty(signature)) continue;
           const fn = resolvedMap[signature]
 
           if (isReferToSelf(fn)) {
@@ -1269,6 +1271,7 @@
       let signaturesMap = {}
       const parseCache = {}
       for (let signature in rawSignaturesMap) {
+        if (!rawSignaturesMap.hasOwnProperty(signature)) continue;
         const parsed = parseSignature(signature, rawSignaturesMap[signature])
         if (!parsed) continue;
         parsedSignatures.forEach(function (s) {
@@ -1292,6 +1295,7 @@
       // Collect all of the signatures and their extensions by conversions
       const signatures = []
       for (let s in signaturesMap) {
+        if (!signaturesMap.hasOwnProperty(s)) continue;
         const fn = signaturesMap[s]
         const params = parseCache[s]
         signatures.push({ params: params, fn: fn })
@@ -1828,19 +1832,23 @@
       typed.addTypes([type], before);
     };
 
-    /**
-     * Add a conversion
-     * @param {{from: string, to: string, convert: function}} conversion
-     * @returns {void}
-     * @throws {TypeError}
-     */
-    typed.addConversion = function (conversion) {
+    function _validateConversion (conversion) {
       if (!conversion
           || typeof conversion.from !== 'string'
           || typeof conversion.to !== 'string'
           || typeof conversion.convert !== 'function') {
         throw new TypeError('Object with properties {from: string, to: string, convert: function} expected');
       }
+    }
+    
+    /**
+     * Add a conversion
+     * @param {{from: string, to: string, convert: function}} conversion
+     * @returns {void}
+     * @throws {TypeError, SyntaxError, Error}
+     */
+    typed.addConversion = function (conversion) {
+      _validateConversion(conversion);
 
       if (conversion.to === conversion.from) {
         throw new SyntaxError(
@@ -1849,7 +1857,6 @@
       }
 
       const to = findType(conversion.to)
-      console.log('Adding', conversion.from, 'to', to.name)
       if (to.conversionsTo.every(function (other) {
         return other.from !== conversion.from
       })) {
@@ -1858,7 +1865,6 @@
           convert: conversion.convert,
           index: typed._nconversions++
         })
-        console.log('...yielding', to.conversionsTo)
       } else {
         throw new Error(
           'There is already a conversion from "' + conversion.from + '" to "' +
@@ -1871,6 +1877,31 @@
      */
     typed.addConversions = function (conversions) {
       conversions.forEach(typed.addConversion);
+    }
+
+    /**
+     * Remove the specified conversion. The format is the same as for
+     * addConversion, and the convert function must match or an error
+     * is thrown.
+     * @param {{from: string, to: string, convert: function}} conversion
+     * @throws {TypeError}
+     */
+    typed.removeConversion = function (conversion) {
+      _validateConversion(conversion);
+      const to = findType(conversion.to);
+      const existingConversion =
+        findInArray(to.conversionsTo, c => (c.from === conversion.from))
+      if (!existingConversion) {
+        throw new Error(
+          'Attempt to remove nonexistent conversion from ' + conversion.from +
+          ' to ' + conversion.to);
+      }
+      if (existingConversion.convert !== conversion.convert) {
+        throw new Error(
+          'Conversion to remove does not match existing conversion');
+      }
+      const index = to.conversionsTo.indexOf(existingConversion);
+      to.conversionsTo.splice(index, 1);
     }
 
     return typed;
